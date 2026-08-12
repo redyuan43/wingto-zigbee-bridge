@@ -1,0 +1,92 @@
+# Describes the format for available Wingto services
+
+pull_devices:
+  name: Pull devices
+  description: Pull device list .
+
+force_update:
+  name: Force update
+  description: Force all devices to pull data.
+
+# Service ID
+set_range_of_sensing_occupancy:
+  # Service name as shown in UI
+  name: Set the range of sensing occupancy
+  # Description of the service
+  description: Set the range in which the occupancy could be sensed.
+  target:
+    entity:
+      integration: wingto_zigbee_bridge
+      domain: binary_sensor
+      device_class: motion
+  # Different fields that your service accepts
+  fields:
+    # Key of the field
+    range_of_sensing_occupancy:
+      # Field name as shown in UI
+      name: Range of sensing occupancy
+      # Description of the field
+      description: The range in which occupancy could be sensed, and the value is in percentage.
+      # Whether or not field is required (default = false)
+      required: true
+      # Advanced fields are only shown when the advanced mode is enabled for the user (default = false)
+      advanced: true
+      # Example value that can be passed for this field
+      example: 90
+      # The default field value
+      default: 90
+      # Selector (https://www.home-assistant.io/docs/blueprint/selectors/) to control the input UI for this field
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+set_reportable_change_of_illuminance:
+  name: Set reportable change of illuminance
+  description: Set the value of illuminance changed by which a reprort would be triggered.
+  target:
+    entity:
+      integration: wingto_zigbee_bridge
+      domain: sensor
+      device_class: illuminance
+  fields:
+    reportable_change_of_illuminance:
+      name: Reportable change of illuminance
+      description: The value great than or equal to which the illuminance changed will trigger a report.
+      required: true
+      advanced: true
+      example: 90
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 1
+          unit_of_measurement: lx
+          mode: slider
+
+set_timeout_to_lock_automatically:
+  name: Set timeout to lock door automatically
+  description: Set the timeout to lock door automatically.
+  target:
+    entity:
+      integration: wingto_zigbee_bridge
+      domain: lock
+  fields:
+    timeout:
+      name: Timeout to lock door automatically
+      description: The value of time by which it exceeds after door is open to lock again automatically.
+      required: true
+      advanced: true
+      example: 10
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          unit_of_measurement: "second(s)"
+          mode: slider

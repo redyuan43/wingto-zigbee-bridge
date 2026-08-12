@@ -1,0 +1,234 @@
+import logging
+import json
+from .base import WingtoDevice
+
+_LOGGER = logging.getLogger(__name__)
+
+# VRV2房间映射 - 基于真实捕获的命令
+VRV2_ROOM_CONTROL_MAP = {
+    1: "04",  # 主卧
+    2: "02",  # 多功能房
+    3: "03",  # 儿童房
+    4: "01",  # 客厅
+}
+
+# VRV2房间名称映射
+VRV2_ROOM_NAMES = {
+    1: "主卧",
+    2: "多功能房",
+    3: "儿童房",
+    4: "客厅",
+}
+
+class WingtoClimate(WingtoDevice):
+
+    def __init__(self, data, api):
+        super().__init__(data, api)
+        self.update_state(False)
+
+        # 从data中提取设备信息
+        # 新data结构: (eui64, (platform, endpoint, src_endpoint), device_info, val_attrs, clusters)
+        self._device_type = "VRV2"
+        self._control_sn = 1  # 默认值
+        self._room_name = "主卧"  # 默认值
+
+        # 尝试从endpoint信息获取房间号
+        if len(data) >= 2 and len(data[1]) >= 2:
+            endpoint = data[1][1]  # endpoint号
+            if 1 <= endpoint <= 4:
+                self._control_sn = endpoint
+
+        # 优先使用val_attrs中的配置
+        if len(data) >= 4 and isinstance(data[3], dict):
+            val_attrs = data[3]
+            if 'control_sn' in val_attrs:
+                self._control_sn = val_attrs['control_sn']
+            if 'room_name' in val_attrs:
+                self._room_name = val_attrs['room_name']
+            _LOGGER.info("VRV2: Using val_attrs - control_sn=%d, room_name=%s",
+                        self._control_sn, self._room_name)
+
+        # 确保control_sn在有效范围内
+        if self._control_sn not in VRV2_ROOM_CONTROL_MAP:
+            _LOGGER.warning("VRV2: Invalid control_sn %d, using default 1", self._control_sn)
+            self._control_sn = 1
+
+        self._gateway_eui64 = "5C0272FFFED495F6"  # 从vrv2_control_advanced.sh获取
+        self._vrv2_addr = "35647"  # VRV2设备地址
+        self._sn_counter = 201 + (self._control_sn - 1) * 10  # 序列号计数器，每个房间不同
+
+        _LOGGER.info("VRV2: Initialized climate device: %s (Room %d: %s)",
+                     self.object_id(), self._control_sn,
+                     VRV2_ROOM_NAMES.get(self._control_sn, f"房间{self._control_sn}"))
+
+    def set_room_number(self, room_number):
+        """设置房间号 (1-4)"""
+        if room_number in VRV2_ROOM_CONTROL_MAP:
+            self._control_sn = room_number
+            _LOGGER.info("Room number set to %d: %s", room_number,
+                         VRV2_ROOM_NAMES.get(room_number, f"房间{room_number}"))
+        else:
+            _LOGGER.warning("Invalid room number: %d. Valid range: 1-4", room_number)
+
+    def _send_vrv2_command(self, zclbuf, description):
+        """发送VRV2 MQTT命令"""
+        try:
+            message = {
+                "cmdtype": "zcl",
+                "addrmode": 1,
+                "destaddr": int(self._vrv2_addr),
+                "srcendpoint": 1,
+                "destendpoint": 1,
+                "clusterid": 65280,
+                "zclfc": 17,
+                "sn": self._sn_counter,
+                "zclmfgid": 4475,
+                "zclcmd": 16,
+                "zclbuflen": 14,
+                "zclbuf": zclbuf
+            }
+
+            mqtt_topic = f"gw/{self._gateway_eui64}/commadzgm"
+            message_json = json.dumps(message)
+
+            _LOGGER.info("[房间%d] %s - 发送命令: %s", self._control_sn, description, zclbuf)
+
+            # 通过API发送MQTT消息
+            if self._api.send_mqtt_message(mqtt_topic, message_json):
+                self._sn_counter += 1
+                _LOGGER.info("✅ VRV2命令发送成功: %s", description)
+                return True
+            else:
+                _LOGGER.warning("❌ VRV2命令发送失败: %s", description)
+                return False
+
+        except Exception as e:
+            _LOGGER.error("发送VRV2命令时发生异常: %s", e)
+            return False
+
+    def turn_on(self):
+        """Turn on the climate device."""
+        room_code = VRV2_ROOM_CONTROL_MAP.get(self._control_sn, "04")
+        zclbuf = f"{room_code}020001000000"
+        description = f"开启空调 - {VRV2_ROOM_NAMES.get(self._control_sn, f'房间{self._control_sn}')}"
+
+        if self._send_vrv2_command(zclbuf, description):
+            self.update_state(True)
+
+    def turn_off(self):
+        """Turn off the climate device."""
+        room_code = VRV2_ROOM_CONTROL_MAP.get(self._control_sn, "04")
+        zclbuf = f"{room_code}020000000000"
+        description = f"关闭空调 - {VRV2_ROOM_NAMES.get(self._control_sn, f'房间{self._control_sn}')}"
+
+        if self._send_vrv2_command(zclbuf, description):
+            self.update_state(False)
+
+    def set_temperature(self, temperature):
+        """Set target temperature (16-30°C)."""
+        if temperature < 16 or temperature > 30:
+            _LOGGER.warning("温度超出范围 (16-30°C): %d", temperature)
+            return
+
+        hex_temp = f"{temperature:02x}"
+
+        # 温度控制命令格式（已验证）：[房间码]040000[温度]0000
+        # 房间1(主卧): 04040000[温度]0000
+        # 房间4(客厅): 01040000[温度]0000
+        room_code = VRV2_ROOM_CONTROL_MAP.get(self._control_sn, "04")
+        zclbuf = f"{room_code}040000{hex_temp}0000"
+
+        description = f"设置{VRV2_ROOM_NAMES.get(self._control_sn, f'房间{self._control_sn}')}温度到 {temperature}°C"
+        self._send_vrv2_command(zclbuf, description)
+
+    def set_mode(self, mode):
+        """Set climate mode (cool, heat, auto, etc.)."""
+        _LOGGER.info("设置模式 %s (房间%d) - 需要实现模式控制命令", mode, self._control_sn)
+        # TODO: 需要捕获不同模式的真实命令
+
+    def set_fan_mode(self, fan_mode):
+        """Set fan mode."""
+        fan_code_map = {
+            0: "1000",  # 自动风
+            1: "1000",  # 小风
+            2: "3000",  # 中风 (已验证房间1)
+            3: "5000",  # 大风 (已验证房间1)
+        }
+
+        fan_names = ["auto", "low", "medium", "high"]
+        fan_code = fan_code_map.get(fan_mode, "3000")
+        fan_name = fan_names[fan_mode] if 0 <= fan_mode < len(fan_names) else 'unknown'
+
+        # 风量控制命令格式（已验证）：[房间码]08000000[风量码]
+        # 房间1(主卧): 0408000000[风量码] ✅已验证
+        # 房间4(客厅): 0108000000[风量码] ✅已验证
+        room_code = VRV2_ROOM_CONTROL_MAP.get(self._control_sn, "04")
+        zclbuf = f"{room_code}08000000{fan_code}"
+
+        description = f"设置{VRV2_ROOM_NAMES.get(self._control_sn, f'房间{self._control_sn}')}风量为{fan_name}"
+        self._send_vrv2_command(zclbuf, description)
+
+    def get_current_temperature(self):
+        """Get current temperature."""
+        try:
+            # 根据VRV2协议调整数据读取
+            temp = self._attrs.get('current_temperature', 0)
+            _LOGGER.debug("Current temperature for %s: %d", self.object_id(), temp)
+            return temp
+        except (KeyError, TypeError) as e:
+            _LOGGER.warning("Failed to get current temperature for %s: %s", self.object_id(), e)
+            return None
+
+    def get_target_temperature(self):
+        """Get target temperature."""
+        try:
+            # 根据VRV2协议调整数据读取 - 使用attr_id 1
+            temp = self._attrs.get(1, 25)  # 默认25度
+            _LOGGER.debug("Target temperature for %s: %d", self.object_id(), temp)
+            return temp
+        except (KeyError, TypeError) as e:
+            _LOGGER.warning("Failed to get target temperature for %s: %s", self.object_id(), e)
+            return None
+
+    def get_mode(self):
+        """Get current mode."""
+        try:
+            # 根据VRV2协议调整数据读取 - 使用attr_id 2
+            mode = self._attrs.get(2, 0)
+            _LOGGER.debug("Current mode for %s: %d", self.object_id(), mode)
+            return mode
+        except (KeyError, TypeError) as e:
+            _LOGGER.warning("Failed to get mode for %s: %s", self.object_id(), e)
+            return None
+
+    def get_fan_mode(self):
+        """Get current fan mode."""
+        try:
+            # 根据VRV2协议调整数据读取 - 使用attr_id 3
+            fan_mode = self._attrs.get(3, 0)
+            _LOGGER.debug("Current fan mode for %s: %d", self.object_id(), fan_mode)
+            return fan_mode
+        except (KeyError, TypeError) as e:
+            _LOGGER.warning("Failed to get fan mode for %s: %s", self.object_id(), e)
+            return None
+
+    def get_power_state(self):
+        """Get current power state."""
+        try:
+            # 根据VRV2协议调整数据读取 - 使用attr_id 0
+            power_state = self._attrs.get(0, "0")
+            _LOGGER.debug("Current power state for %s: %s", self.object_id(), power_state)
+            return power_state == "1"
+        except (KeyError, TypeError) as e:
+            _LOGGER.warning("Failed to get power state for %s: %s", self.object_id(), e)
+            return False
+
+    async def startup_init(self):
+        """Initialize climate state."""
+        _LOGGER.info("Initializing %s climate state for: %s", self._device_type, self.object_id())
+        self._control_device("local_read_vrv2_state")
+
+    async def refresh_state(self):
+        """刷新设备状态"""
+        _LOGGER.info("Refreshing %s climate state for: %s", self._device_type, self.object_id())
+        self._control_device("local_read_vrv2_state") 
