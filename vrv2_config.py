@@ -5,7 +5,7 @@ VRV2空调系统配置文件
 
 # VRV2网关配置
 VRV2_GATEWAY_CONFIG = {
-    "ip": "192.168.100.111",
+    "ip": "192.168.100.193",
     "eui64": "5C0272FFFED495F6",
     "mqtt_port": 1883,
     "connection_timeout": 60,
